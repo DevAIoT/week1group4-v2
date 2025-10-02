@@ -1,11 +1,11 @@
 /*
  * Enhanced IoT Curtain Control - Arduino Firmware
- * Version: 2.0
+ * Version: 2.1 - Optimized for Spinning Motor
  * Features:
  * - Smoothed light sensor readings with running average
  * - Calibration support for min/max light values
  * - Comprehensive command protocol
- * - Motor position tracking
+ * - Spinning motor control (fast=open, slow=close)
  * - EEPROM persistence for calibration
  * - Error handling and validation
  */
@@ -19,7 +19,11 @@
 // Pin definitions
 const int MOTOR_PIN = 9;           // PWM-capable pin for motor control
 const int LIGHT_SENSOR_PIN = A0;   // Analog pin for photoresistor
-const int MOTOR_DIR_PIN = 8;       // Optional: motor direction control
+
+// Motor speed settings for spinning motor
+const int MOTOR_SPEED_OPENING = 255;  // Fast speed for opening (100%)
+const int MOTOR_SPEED_CLOSING = 128;  // Slower speed for closing (50%)
+const int MOTOR_SPEED_STOPPED = 0;    // Motor off
 
 // Timing constants
 const unsigned long LIGHT_READ_INTERVAL = 500;      // ms between light readings
@@ -67,7 +71,7 @@ enum CurtainPosition {
 MotorState motorState = MOTOR_STOPPED;
 CurtainPosition curtainPosition = POSITION_UNKNOWN;
 unsigned long motorStartTime = 0;
-int motorSpeed = 255; // 0-255 PWM value
+int currentMotorSpeed = MOTOR_SPEED_STOPPED;
 
 // Timing variables
 unsigned long lastLightRead = 0;
@@ -90,26 +94,35 @@ void setup() {
   
   // Initialize pins
   pinMode(MOTOR_PIN, OUTPUT);
-  pinMode(MOTOR_DIR_PIN, OUTPUT);
-  digitalWrite(MOTOR_PIN, LOW);
-  digitalWrite(MOTOR_DIR_PIN, LOW);
+  analogWrite(MOTOR_PIN, 0);  // Start with motor stopped
   
   // Initialize light sensor readings array
   for (int i = 0; i < LIGHT_SAMPLES; i++) {
     lightReadings[i] = 0;
   }
   
+  // Pre-fill light readings with initial values
+  for (int i = 0; i < LIGHT_SAMPLES; i++) {
+    int reading = analogRead(LIGHT_SENSOR_PIN);
+    lightReadings[i] = reading;
+    lightTotal += reading;
+    delay(10);
+  }
+  lightAverage = lightTotal / LIGHT_SAMPLES;
+  
   // Load calibration from EEPROM
   loadCalibration();
   
   // Send ready message
-  Serial.println("READY:Arduino Curtain Control v2.0");
+  Serial.println("READY:Arduino Curtain Control v2.1 (Spinning Motor)");
   Serial.print("CALIBRATION:");
   Serial.print(isCalibrated ? "YES" : "NO");
   Serial.print(",MIN:");
   Serial.print(lightMin);
   Serial.print(",MAX:");
   Serial.println(lightMax);
+  Serial.print("INITIAL_LIGHT:");
+  Serial.println(lightAverage);
   
   delay(100);
 }
@@ -189,13 +202,15 @@ void openCurtain() {
     return;
   }
   
-  digitalWrite(MOTOR_DIR_PIN, HIGH);
-  analogWrite(MOTOR_PIN, motorSpeed);
+  // Set motor to fast speed for opening
+  analogWrite(MOTOR_PIN, MOTOR_SPEED_OPENING);
+  currentMotorSpeed = MOTOR_SPEED_OPENING;
   motorState = MOTOR_OPENING;
   motorStartTime = millis();
   curtainPosition = POSITION_PARTIAL;
   
-  Serial.println("MOTOR:OPENING");
+  Serial.print("MOTOR:OPENING at speed ");
+  Serial.println(MOTOR_SPEED_OPENING);
   Serial.println("POSITION:OPENING");
 }
 
@@ -205,40 +220,59 @@ void closeCurtain() {
     return;
   }
   
-  digitalWrite(MOTOR_DIR_PIN, LOW);
-  analogWrite(MOTOR_PIN, motorSpeed);
+  // Set motor to slow speed for closing
+  analogWrite(MOTOR_PIN, MOTOR_SPEED_CLOSING);
+  currentMotorSpeed = MOTOR_SPEED_CLOSING;
   motorState = MOTOR_CLOSING;
   motorStartTime = millis();
   curtainPosition = POSITION_PARTIAL;
   
-  Serial.println("MOTOR:CLOSING");
+  Serial.print("MOTOR:CLOSING at speed ");
+  Serial.println(MOTOR_SPEED_CLOSING);
   Serial.println("POSITION:CLOSING");
 }
 
 void stopMotor() {
-  digitalWrite(MOTOR_PIN, LOW);
+  // Store the previous state BEFORE changing it
+  MotorState previousState = motorState;
+  
+  // Stop the motor
+  analogWrite(MOTOR_PIN, 0);
+  currentMotorSpeed = MOTOR_SPEED_STOPPED;
   motorState = MOTOR_STOPPED;
   
   Serial.println("MOTOR:STOPPED");
   
-  // Update position based on previous state
-  if (motorState == MOTOR_OPENING) {
+  // Update position based on PREVIOUS state
+  if (previousState == MOTOR_OPENING) {
     curtainPosition = POSITION_OPEN;
     Serial.println("POSITION:OPEN");
-  } else if (motorState == MOTOR_CLOSING) {
+  } else if (previousState == MOTOR_CLOSING) {
     curtainPosition = POSITION_CLOSED;
     Serial.println("POSITION:CLOSED");
   }
 }
 
-void setMotorSpeed(int speed) {
-  motorSpeed = constrain(speed, 0, 255);
-  Serial.print("MOTOR_SPEED:");
-  Serial.println(motorSpeed);
+void setMotorSpeed(int speedPercent) {
+  // Map percentage to PWM value
+  int pwmValue = map(constrain(speedPercent, 0, 100), 0, 100, 0, 255);
   
-  // Update current motor if running
-  if (motorState != MOTOR_STOPPED) {
-    analogWrite(MOTOR_PIN, motorSpeed);
+  Serial.print("MOTOR_SPEED_SET:");
+  Serial.print(speedPercent);
+  Serial.print("% (PWM:");
+  Serial.print(pwmValue);
+  Serial.println(")");
+  
+  // Update speed based on current motor state
+  if (motorState == MOTOR_OPENING) {
+    currentMotorSpeed = pwmValue;
+    analogWrite(MOTOR_PIN, pwmValue);
+  } else if (motorState == MOTOR_CLOSING) {
+    // For closing, use a lower speed
+    currentMotorSpeed = pwmValue / 2;
+    analogWrite(MOTOR_PIN, currentMotorSpeed);
+  } else {
+    Serial.println("STATUS:Motor stopped - use OPEN/CLOSE first");
   }
 }
 
@@ -365,6 +399,8 @@ void processCommand(String command) {
     Serial.println(lightAverage);
     Serial.print("LIGHT_PERCENT:");
     Serial.println(getPercentageLight());
+    Serial.print("LIGHT_RAW:");
+    Serial.println(analogRead(LIGHT_SENSOR_PIN));
   }
   else if (cmd == "GET_STATUS") {
     sendStatusReport();
@@ -378,16 +414,19 @@ void processCommand(String command) {
   else if (cmd == "SET_SPEED") {
     if (params.length() > 0) {
       int speed = params.toInt();
-      setMotorSpeed(map(speed, 0, 100, 0, 255));
+      setMotorSpeed(speed);
     } else {
       Serial.println("ERROR:MISSING_SPEED_PARAMETER");
     }
+  }
+  else if (cmd == "TEST_MOTOR") {
+    testMotor();
   }
   else if (cmd == "PING") {
     Serial.println("PONG");
   }
   else if (cmd == "VERSION") {
-    Serial.println("VERSION:2.0");
+    Serial.println("VERSION:2.1-SPINNING");
   }
   else {
     Serial.print("ERROR:UNKNOWN_COMMAND:");
@@ -407,6 +446,8 @@ void sendStatusReport() {
   Serial.println(lightAverage);
   Serial.print("LIGHT_PERCENT:");
   Serial.println(getPercentageLight());
+  Serial.print("LIGHT_RAW:");
+  Serial.println(analogRead(LIGHT_SENSOR_PIN));
   
   // Motor status
   Serial.print("MOTOR:");
@@ -415,6 +456,9 @@ void sendStatusReport() {
     case MOTOR_OPENING:  Serial.println("OPENING"); break;
     case MOTOR_CLOSING:  Serial.println("CLOSING"); break;
   }
+  
+  Serial.print("MOTOR_SPEED:");
+  Serial.println(currentMotorSpeed);
   
   // Curtain position
   Serial.print("POSITION:");
@@ -438,4 +482,25 @@ void sendStatusReport() {
   Serial.println(millis());
   
   Serial.println("STATUS:REPORT_END");
+}
+
+// ============================================================================
+// TESTING FUNCTIONS
+// ============================================================================
+
+void testMotor() {
+  Serial.println("TEST:MOTOR_START");
+  Serial.println("TEST:Testing fast speed (opening)...");
+  
+  analogWrite(MOTOR_PIN, MOTOR_SPEED_OPENING);
+  delay(2000);
+  
+  Serial.println("TEST:Testing slow speed (closing)...");
+  analogWrite(MOTOR_PIN, MOTOR_SPEED_CLOSING);
+  delay(2000);
+  
+  Serial.println("TEST:Stopping motor...");
+  analogWrite(MOTOR_PIN, 0);
+  
+  Serial.println("TEST:MOTOR_COMPLETE");
 } 

@@ -40,7 +40,7 @@ database:
 # Web Server Settings
 server:
   host: "0.0.0.0"
-  port: 5000
+  port: 5001
   debug: false
   cors_enabled: true
 
