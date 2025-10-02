@@ -1,0 +1,74 @@
+# IoT Curtain Control System Configuration
+# Version: 2.0
+
+# Serial Communication Settings
+serial:
+  port: "/dev/ttyACM0"  # Change to /dev/ttyUSB0 or COM3 on Windows
+  baudrate: 115200
+  timeout: 2
+  reconnect_interval: 5  # seconds
+
+# MQTT Broker Settings
+mqtt:
+  broker: "localhost"
+  port: 1883
+  keepalive: 60
+  client_id: "curtain_control_rpi"
+  username: null  # Set if authentication required
+  password: null  # Set if authentication required
+  
+  # MQTT Topics
+  topics:
+    light_reading: "curtain/light/reading"
+    position_status: "curtain/position/status"
+    control_command: "curtain/control/command"
+    system_status: "curtain/system/status"
+    alerts: "curtain/alerts/errors"
+    heartbeat: "curtain/system/heartbeat"
+  
+  # Publishing intervals (seconds)
+  publish_interval:
+    light: 5
+    status: 10
+    heartbeat: 30
+
+# Database Settings
+database:
+  path: "curtain_control.db"
+  retention_days: 30  # Days to keep historical data
+
+# Web Server Settings
+server:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+  cors_enabled: true
+
+# Curtain Control Settings
+curtain:
+  auto_mode: false
+  thresholds:
+    dark: 300   # Open curtains when light < this value
+    bright: 700  # Close curtains when light > this value
+    hysteresis: 50  # Prevent rapid switching
+  
+  motor:
+    default_speed: 100  # Percentage
+    timeout: 30  # seconds
+  
+  position:
+    default: "unknown"  # Initial position
+
+# Logging Settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/curtain_control.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+
+# System Settings
+system:
+  timezone: "UTC"
+  data_directory: "data"
+  enable_simulation: true  # Allow running without Arduino connected 
