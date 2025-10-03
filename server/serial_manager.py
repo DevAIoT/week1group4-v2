@@ -80,8 +80,12 @@ class SerialManager:
             # Start read thread
             self.start_reading()
             
-            # Request initial status
+            # Set initial mode to MANUAL to match server expectation
             time.sleep(0.5)
+            self.send_command("MANUAL_MODE")
+            time.sleep(0.2)
+            
+            # Request initial status
             self.send_command("GET_STATUS")
             
             return True
@@ -170,6 +174,8 @@ class SerialManager:
                 self._handle_position_update(msg_data)
             elif msg_type == "MOTOR":
                 self._handle_motor_status(msg_data)
+            elif msg_type == "MODE":
+                self._handle_mode_update(msg_data)
             elif msg_type == "CALIBRATION":
                 self._handle_calibration_data(msg_data)
             elif msg_type == "ERROR":
@@ -217,6 +223,16 @@ class SerialManager:
         
         if "MOTOR" in self.callbacks:
             self.callbacks["MOTOR"](data.lower())
+    
+    def _handle_mode_update(self, data: str):
+        """Handle mode update from Arduino"""
+        mode = data.strip().upper()
+        self.logger.info(f"📡 Arduino MODE update: '{mode}' -> passing '{mode.lower()}' to callback")
+        
+        if "MODE" in self.callbacks:
+            self.callbacks["MODE"](mode.lower())
+        else:
+            self.logger.warning("No MODE callback registered!")
     
     def _handle_calibration_data(self, data: str):
         """Handle calibration information"""

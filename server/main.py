@@ -99,12 +99,20 @@ def setup_components():
         serial_mgr.register_callback('LIGHT', on_light_reading)
         serial_mgr.register_callback('POSITION', on_position_update)
         serial_mgr.register_callback('MOTOR', on_motor_status)
+        serial_mgr.register_callback('MODE', on_mode_update)
         serial_mgr.register_callback('ERROR', on_arduino_error)
         
         # Attempt connection
         if serial_mgr.connect():
             system_status.arduino = serial_mgr.get_arduino_status()
             logger.info("Arduino connected successfully")
+            
+            # Initialize Arduino to manual mode to sync with server default
+            # Wait longer to ensure Arduino has fully booted and processed initial messages
+            time.sleep(1.5)  # Increased delay for Arduino initialization
+            serial_mgr.send_command("MANUAL_MODE")
+            time.sleep(0.3)  # Wait for response
+            logger.info("Initialized Arduino to MANUAL mode")
         else:
             logger.warning("Arduino connection failed - running without hardware")
             
@@ -193,6 +201,26 @@ def on_motor_status(status: str):
         logging.info(f"Motor status updated: {status}")
     except Exception as e:
         logging.error(f"Error handling motor status: {e}")
+
+
+def on_mode_update(mode: str):
+    """Handle mode update from Arduino"""
+    global system_status
+    
+    try:
+        mode_lower = mode.lower()
+        logging.info(f"Received MODE update from Arduino: '{mode_lower}'")
+        
+        if system_status:
+            # Update both the settings and curtain mode
+            system_status.settings.auto_mode_enabled = (mode_lower == 'auto')
+            system_status.curtain.mode = SystemMode(mode_lower)
+            logging.info(f"✓ System status updated: mode={mode_lower}, auto_enabled={system_status.settings.auto_mode_enabled}")
+        else:
+            logging.warning("System status not initialized, cannot update mode")
+            
+    except Exception as e:
+        logging.error(f"Error handling mode update: {e}", exc_info=True)
 
 
 def on_arduino_error(error_msg: str):
@@ -418,10 +446,21 @@ def set_mode():
         else:
             serial_mgr.send_command("MANUAL_MODE")
         
-        # Update system status
+        # Wait briefly for Arduino to process and respond
+        time.sleep(0.2)
+        
+        # System status will be updated by the on_mode_update callback
+        # when Arduino responds with MODE:AUTO or MODE:MANUAL
+        
+        # Verify the mode was set correctly by checking system status
         if system_status:
-            system_status.settings.auto_mode_enabled = (mode == 'auto')
-            system_status.curtain.mode = SystemMode(mode)
+            actual_mode = system_status.curtain.mode.value
+            if actual_mode == mode:
+                logger.info(f"Mode successfully changed to {mode}")
+                return jsonify({'status': 'success', 'mode': mode})
+            else:
+                logger.warning(f"Mode change requested to {mode} but Arduino is in {actual_mode}")
+                return jsonify({'status': 'warning', 'requested': mode, 'actual': actual_mode})
         
         return jsonify({'status': 'success', 'mode': mode})
         
