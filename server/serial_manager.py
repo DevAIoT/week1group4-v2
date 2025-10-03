@@ -310,6 +310,24 @@ class SerialManager:
         """Send command to close curtain"""
         return self.send_command("CLOSE_CURTAIN")
     
+    def set_open_threshold(self, threshold: int) -> bool:
+        """
+        Set light threshold for opening curtain
+        
+        Args:
+            threshold: Light level below which curtain opens (0-1023)
+        """
+        return self.send_command("SET_OPEN_THRESHOLD", str(threshold))
+    
+    def set_close_threshold(self, threshold: int) -> bool:
+        """
+        Set light threshold for closing curtain
+        
+        Args:
+            threshold: Light level above which curtain closes (0-1023)
+        """
+        return self.send_command("SET_CLOSE_THRESHOLD", str(threshold))
+    
     def stop_motor(self) -> bool:
         """Send command to stop motor"""
         return self.send_command("STOP_MOTOR")

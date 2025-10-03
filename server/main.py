@@ -284,28 +284,25 @@ def auto_mode_loop():
                 continue
             
             thresholds = config['curtain']['thresholds']
-            dark_threshold = thresholds['dark']
-            bright_threshold = thresholds['bright']
-            hysteresis = thresholds.get('hysteresis', 50)
+            open_threshold = thresholds['dark']
+            close_threshold = thresholds['bright']
             
             current_position = system_status.curtain.position
             
-            # Auto open when dark
-            if latest_light_value < (dark_threshold - hysteresis):
+            # In auto mode, Arduino handles the continuous motor control
+            # Server just logs the activity
+            if latest_light_value < open_threshold:
                 if current_position != CurtainPosition.OPEN:
-                    logger.info(f"Auto mode: Opening curtains (light: {latest_light_value})")
-                    serial_mgr.open_curtain()
+                    logger.info(f"Auto mode: Curtain opening (light: {latest_light_value})")
                     if db:
-                        db.log_operation('open', 'auto_dark', latest_light_value)
+                        db.log_operation('auto_opening', 'auto_dark', latest_light_value)
                     last_action_time = time.time()
             
-            # Auto close when bright
-            elif latest_light_value > (bright_threshold + hysteresis):
+            elif latest_light_value > close_threshold:
                 if current_position != CurtainPosition.CLOSED:
-                    logger.info(f"Auto mode: Closing curtains (light: {latest_light_value})")
-                    serial_mgr.close_curtain()
+                    logger.info(f"Auto mode: Curtain closing (light: {latest_light_value})")
                     if db:
-                        db.log_operation('close', 'auto_bright', latest_light_value)
+                        db.log_operation('auto_closing', 'auto_bright', latest_light_value)
                     last_action_time = time.time()
                     
         except Exception as e:
@@ -437,6 +434,48 @@ def calibrate():
     try:
         serial_mgr.calibrate_light()
         return jsonify({'status': 'Calibration started', 'duration': '10 seconds'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/v1/curtain/thresholds', methods=['GET'])
+def get_thresholds():
+    """Get current light thresholds"""
+    return jsonify({
+        'open_threshold': config['curtain']['thresholds']['dark'],
+        'close_threshold': config['curtain']['thresholds']['bright']
+    })
+
+
+@app.route('/api/v1/curtain/thresholds', methods=['POST'])
+def set_thresholds():
+    """Set light thresholds"""
+    data = request.json
+    
+    if not serial_mgr or not serial_mgr.is_connected():
+        return jsonify({'error': 'Arduino not connected'}), 503
+    
+    try:
+        if 'open_threshold' in data:
+            open_threshold = int(data['open_threshold'])
+            if 0 <= open_threshold <= 1023:
+                serial_mgr.send_command("SET_OPEN_THRESHOLD", str(open_threshold))
+                config['curtain']['thresholds']['dark'] = open_threshold
+        
+        if 'close_threshold' in data:
+            close_threshold = int(data['close_threshold'])
+            if 0 <= close_threshold <= 1023:
+                serial_mgr.send_command("SET_CLOSE_THRESHOLD", str(close_threshold))
+                config['curtain']['thresholds']['bright'] = close_threshold
+        
+        return jsonify({
+            'status': 'success',
+            'open_threshold': config['curtain']['thresholds']['dark'],
+            'close_threshold': config['curtain']['thresholds']['bright']
+        })
+        
+    except (ValueError, KeyError) as e:
+        return jsonify({'error': 'Invalid threshold values'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

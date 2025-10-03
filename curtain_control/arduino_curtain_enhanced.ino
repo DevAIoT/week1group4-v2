@@ -1,13 +1,13 @@
 /*
  * Enhanced IoT Curtain Control - Arduino Firmware
- * Version: 2.1 - Optimized for Spinning Motor
+ * Version: 2.2 - LDR-Controlled Motor Speed
  * Features:
+ * - Motor speed directly controlled by light level
  * - Smoothed light sensor readings with running average
- * - Calibration support for min/max light values
- * - Comprehensive command protocol
- * - Spinning motor control (fast=open, slow=close)
+ * - Auto/Manual mode switching
+ * - Adjustable light threshold
+ * - Serial command protocol for IoT integration
  * - EEPROM persistence for calibration
- * - Error handling and validation
  */
 
 #include <EEPROM.h>
@@ -18,28 +18,26 @@
 
 // Pin definitions
 const int MOTOR_PIN = 9;           // PWM-capable pin for motor control
-const int LIGHT_SENSOR_PIN = A0;   // Analog pin for photoresistor
+const int LIGHT_SENSOR_PIN = A0;   // Analog pin for LDR
 
-// Motor speed settings for spinning motor
-const int MOTOR_SPEED_OPENING = 255;  // Fast speed for opening (100%)
-const int MOTOR_SPEED_CLOSING = 128;  // Slower speed for closing (50%)
-const int MOTOR_SPEED_STOPPED = 0;    // Motor off
+// Light threshold settings
+int openThreshold = 300;           // Open curtain when light falls below this
+int closeThreshold = 700;          // Close curtain when light rises above this
 
 // Timing constants
-const unsigned long LIGHT_READ_INTERVAL = 500;      // ms between light readings
+const unsigned long LIGHT_READ_INTERVAL = 200;      // ms between light readings (match your delay)
 const unsigned long STATUS_REPORT_INTERVAL = 5000;  // ms between status reports
-const unsigned long MOTOR_TIMEOUT = 30000;          // ms max motor runtime
+const unsigned long MANUAL_OPEN_DURATION = 3000;    // 3 seconds for manual open
+const unsigned long MANUAL_CLOSE_DURATION = 6000;   // 6 seconds for manual close
 
 // Light sensor configuration
-const int LIGHT_SAMPLES = 10;      // Number of samples for averaging
-const int LIGHT_MIN_DEFAULT = 50;  // Default minimum light value
-const int LIGHT_MAX_DEFAULT = 950; // Default maximum light value
+const int LIGHT_SAMPLES = 5;       // Number of samples for averaging (faster response)
 
 // EEPROM addresses for persistent storage
-const int EEPROM_ADDR_MIN_LIGHT = 0;
-const int EEPROM_ADDR_MAX_LIGHT = 2;
-const int EEPROM_ADDR_CALIBRATED = 4;
-const int EEPROM_MAGIC_NUMBER = 0xAB;
+const int EEPROM_ADDR_OPEN_THRESHOLD = 0;
+const int EEPROM_ADDR_CLOSE_THRESHOLD = 2;
+const int EEPROM_ADDR_AUTO_MODE = 4;
+const int EEPROM_MAGIC_NUMBER = 0xCD;
 
 // ============================================================================
 // GLOBAL VARIABLES
@@ -50,28 +48,18 @@ int lightReadings[LIGHT_SAMPLES];
 int lightReadIndex = 0;
 int lightTotal = 0;
 int lightAverage = 0;
-int lightMin = LIGHT_MIN_DEFAULT;
-int lightMax = LIGHT_MAX_DEFAULT;
-bool isCalibrated = false;
+int currentLightRaw = 0;
 
 // Motor state
-enum MotorState {
-  MOTOR_STOPPED,
-  MOTOR_OPENING,
-  MOTOR_CLOSING
-};
+int currentMotorSpeed = 0;         // Current PWM value (0-255)
+bool autoMode = true;              // Auto mode: motor controlled by light
+bool manualMode = false;           // Manual mode: motor controlled by commands
+int manualMotorSpeed = 0;          // Manual mode speed setting
 
-enum CurtainPosition {
-  POSITION_UNKNOWN,
-  POSITION_OPEN,
-  POSITION_CLOSED,
-  POSITION_PARTIAL
-};
-
-MotorState motorState = MOTOR_STOPPED;
-CurtainPosition curtainPosition = POSITION_UNKNOWN;
-unsigned long motorStartTime = 0;
-int currentMotorSpeed = MOTOR_SPEED_STOPPED;
+// Manual mode timing
+unsigned long manualStartTime = 0; // When manual operation started
+bool manualOperationActive = false; // If manual operation is in progress
+bool manualOpenOperation = false;  // True for open, false for close
 
 // Timing variables
 unsigned long lastLightRead = 0;
@@ -87,10 +75,10 @@ const int MAX_COMMAND_LENGTH = 64;
 
 void setup() {
   // Initialize serial communication
-  Serial.begin(115200);
-  while (!Serial) {
-    ; // Wait for serial port to connect
-  }
+  Serial.begin(115200);  // Using 115200 for consistency with server
+  // while (!Serial) {
+  //   ; // Wait for serial port to connect
+  // }
   
   // Initialize pins
   pinMode(MOTOR_PIN, OUTPUT);
@@ -110,17 +98,17 @@ void setup() {
   }
   lightAverage = lightTotal / LIGHT_SAMPLES;
   
-  // Load calibration from EEPROM
-  loadCalibration();
+  // Load settings from EEPROM
+  loadSettings();
   
   // Send ready message
-  Serial.println("READY:Arduino Curtain Control v2.1 (Spinning Motor)");
-  Serial.print("CALIBRATION:");
-  Serial.print(isCalibrated ? "YES" : "NO");
-  Serial.print(",MIN:");
-  Serial.print(lightMin);
-  Serial.print(",MAX:");
-  Serial.println(lightMax);
+  Serial.println("READY:Arduino Curtain Control v2.3 (Enhanced Control)");
+  Serial.print("MODE:");
+  Serial.println(autoMode ? "AUTO" : "MANUAL");
+  Serial.print("OPEN_THRESHOLD:");
+  Serial.println(openThreshold);
+  Serial.print("CLOSE_THRESHOLD:");
+  Serial.println(closeThreshold);
   Serial.print("INITIAL_LIGHT:");
   Serial.println(lightAverage);
   
@@ -137,9 +125,18 @@ void loop() {
   // Read and process serial commands
   processSerialCommands();
   
-  // Read light sensor with smoothing
+  // Read light sensor
   if (currentTime - lastLightRead >= LIGHT_READ_INTERVAL) {
     readLightSensor();
+    
+    // Update motor based on mode
+    if (autoMode) {
+      updateMotorFromLight();
+    } else {
+      // Manual mode - check if timed operation is active
+      updateManualMode();
+    }
+    
     lastLightRead = currentTime;
   }
   
@@ -147,14 +144,6 @@ void loop() {
   if (currentTime - lastStatusReport >= STATUS_REPORT_INTERVAL) {
     sendStatusReport();
     lastStatusReport = currentTime;
-  }
-  
-  // Check motor timeout
-  if (motorState != MOTOR_STOPPED) {
-    if (currentTime - motorStartTime >= MOTOR_TIMEOUT) {
-      stopMotor();
-      Serial.println("ERROR:MOTOR_TIMEOUT");
-    }
   }
 }
 
@@ -167,7 +156,8 @@ void readLightSensor() {
   lightTotal = lightTotal - lightReadings[lightReadIndex];
   
   // Read new value
-  lightReadings[lightReadIndex] = analogRead(LIGHT_SENSOR_PIN);
+  currentLightRaw = analogRead(LIGHT_SENSOR_PIN);
+  lightReadings[lightReadIndex] = currentLightRaw;
   
   // Add to total
   lightTotal = lightTotal + lightReadings[lightReadIndex];
@@ -183,177 +173,188 @@ void readLightSensor() {
   Serial.println(lightAverage);
 }
 
-int getPercentageLight() {
-  if (!isCalibrated) {
-    return map(lightAverage, 0, 1023, 0, 100);
-  }
-  
-  int percentage = map(lightAverage, lightMin, lightMax, 0, 100);
-  return constrain(percentage, 0, 100);
-}
-
 // ============================================================================
 // MOTOR CONTROL FUNCTIONS
 // ============================================================================
 
-void openCurtain() {
-  if (curtainPosition == POSITION_OPEN) {
-    Serial.println("STATUS:Already open");
-    return;
+void updateMotorFromLight() {
+  int motorSpeed = 0;
+  bool shouldOpen = lightAverage < openThreshold;
+  bool shouldClose = lightAverage > closeThreshold;
+
+  if (shouldOpen) {
+    // Opening: faster speed when light is below open threshold
+    // Map light value to faster speed range (128-255)
+    motorSpeed = map(lightAverage, 0, openThreshold, 255, 128);
+    motorSpeed = constrain(motorSpeed, 128, 255);
+    Serial.print("AUTO OPENING - ");
+  } else if (shouldClose) {
+    // Closing: slower speed when light is above close threshold
+    // Map light value to slower speed range (64-127)
+    motorSpeed = map(lightAverage, closeThreshold, 1023, 64, 127);
+    motorSpeed = constrain(motorSpeed, 64, 127);
+    Serial.print("AUTO CLOSING - ");
+  } else {
+    // Between thresholds - stop motor
+    motorSpeed = 0;
+    Serial.print("AUTO STOPPED - ");
   }
+
+  // Apply speed to motor
+  analogWrite(MOTOR_PIN, motorSpeed);
+  currentMotorSpeed = motorSpeed;
   
-  // Set motor to fast speed for opening
-  analogWrite(MOTOR_PIN, MOTOR_SPEED_OPENING);
-  currentMotorSpeed = MOTOR_SPEED_OPENING;
-  motorState = MOTOR_OPENING;
-  motorStartTime = millis();
-  curtainPosition = POSITION_PARTIAL;
-  
-  Serial.print("MOTOR:OPENING at speed ");
-  Serial.println(MOTOR_SPEED_OPENING);
-  Serial.println("POSITION:OPENING");
+  // Debug info
+  Serial.print("LDR: ");
+  Serial.print(lightAverage);
+  Serial.print(" | Motor Speed: ");
+  Serial.println(motorSpeed);
 }
 
-void closeCurtain() {
-  if (curtainPosition == POSITION_CLOSED) {
-    Serial.println("STATUS:Already closed");
+void updateManualMode() {
+  unsigned long currentTime = millis();
+  
+  if (manualOperationActive) {
+    unsigned long duration = manualOpenOperation ? MANUAL_OPEN_DURATION : MANUAL_CLOSE_DURATION;
+    
+    if (currentTime - manualStartTime >= duration) {
+      // Operation complete - stop motor
+      stopMotor();
+      manualOperationActive = false;
+      Serial.print("MANUAL ");
+      Serial.print(manualOpenOperation ? "OPEN" : "CLOSE");
+      Serial.println(" COMPLETED");
+    }
+    // Motor continues running at set speed until duration expires
+  }
+}
+
+void startManualOpen() {
+  if (!manualMode) {
+    Serial.println("ERROR:NOT_IN_MANUAL_MODE");
     return;
   }
   
-  // Set motor to slow speed for closing
-  analogWrite(MOTOR_PIN, MOTOR_SPEED_CLOSING);
-  currentMotorSpeed = MOTOR_SPEED_CLOSING;
-  motorState = MOTOR_CLOSING;
-  motorStartTime = millis();
-  curtainPosition = POSITION_PARTIAL;
+  manualStartTime = millis();
+  manualOperationActive = true;
+  manualOpenOperation = true;
+  manualMotorSpeed = 200; // Medium-high speed for opening
   
-  Serial.print("MOTOR:CLOSING at speed ");
-  Serial.println(MOTOR_SPEED_CLOSING);
-  Serial.println("POSITION:CLOSING");
+  analogWrite(MOTOR_PIN, manualMotorSpeed);
+  currentMotorSpeed = manualMotorSpeed;
+  
+  Serial.print("MANUAL_OPEN_STARTED:");
+  Serial.print(MANUAL_OPEN_DURATION);
+  Serial.println("ms");
+}
+
+void startManualClose() {
+  if (!manualMode) {
+    Serial.println("ERROR:NOT_IN_MANUAL_MODE");
+    return;
+  }
+  
+  manualStartTime = millis();
+  manualOperationActive = true;
+  manualOpenOperation = false;
+  manualMotorSpeed = 150; // Medium speed for closing
+  
+  analogWrite(MOTOR_PIN, manualMotorSpeed);
+  currentMotorSpeed = manualMotorSpeed;
+  
+  Serial.print("MANUAL_CLOSE_STARTED:");
+  Serial.print(MANUAL_CLOSE_DURATION);
+  Serial.println("ms");
+}
+
+void setMotorSpeedManual(int speed) {
+  if (!manualMode) {
+    Serial.println("ERROR:NOT_IN_MANUAL_MODE");
+    return;
+  }
+  
+  manualMotorSpeed = constrain(speed, 0, 255);
+  analogWrite(MOTOR_PIN, manualMotorSpeed);
+  currentMotorSpeed = manualMotorSpeed;
+  
+  Serial.print("MOTOR_SPEED:");
+  Serial.println(manualMotorSpeed);
 }
 
 void stopMotor() {
-  // Store the previous state BEFORE changing it
-  MotorState previousState = motorState;
-  
-  // Stop the motor
   analogWrite(MOTOR_PIN, 0);
-  currentMotorSpeed = MOTOR_SPEED_STOPPED;
-  motorState = MOTOR_STOPPED;
-  
+  currentMotorSpeed = 0;
+  manualMotorSpeed = 0;
+  manualOperationActive = false;
   Serial.println("MOTOR:STOPPED");
-  
-  // Update position based on PREVIOUS state
-  if (previousState == MOTOR_OPENING) {
-    curtainPosition = POSITION_OPEN;
-    Serial.println("POSITION:OPEN");
-  } else if (previousState == MOTOR_CLOSING) {
-    curtainPosition = POSITION_CLOSED;
-    Serial.println("POSITION:CLOSED");
-  }
 }
 
-void setMotorSpeed(int speedPercent) {
-  // Map percentage to PWM value
-  int pwmValue = map(constrain(speedPercent, 0, 100), 0, 100, 0, 255);
+void setAutoMode(bool enable) {
+  autoMode = enable;
+  manualMode = !enable;
   
-  Serial.print("MOTOR_SPEED_SET:");
-  Serial.print(speedPercent);
-  Serial.print("% (PWM:");
-  Serial.print(pwmValue);
-  Serial.println(")");
-  
-  // Update speed based on current motor state
-  if (motorState == MOTOR_OPENING) {
-    currentMotorSpeed = pwmValue;
-    analogWrite(MOTOR_PIN, pwmValue);
-  } else if (motorState == MOTOR_CLOSING) {
-    // For closing, use a lower speed
-    currentMotorSpeed = pwmValue / 2;
-    analogWrite(MOTOR_PIN, currentMotorSpeed);
-  } else {
-    Serial.println("STATUS:Motor stopped - use OPEN/CLOSE first");
+  if (!autoMode) {
+    // Switched to manual - stop motor
+    stopMotor();
   }
+  
+  saveSettings();
+  
+  Serial.print("MODE:");
+  Serial.println(autoMode ? "AUTO" : "MANUAL");
+}
+
+void setOpenThreshold(int newThreshold) {
+  openThreshold = constrain(newThreshold, 0, 1023);
+  saveSettings();
+  
+  Serial.print("OPEN_THRESHOLD:");
+  Serial.println(openThreshold);
+}
+
+void setCloseThreshold(int newThreshold) {
+  closeThreshold = constrain(newThreshold, 0, 1023);
+  saveSettings();
+  
+  Serial.print("CLOSE_THRESHOLD:");
+  Serial.println(closeThreshold);
 }
 
 // ============================================================================
-// CALIBRATION FUNCTIONS
+// EEPROM FUNCTIONS
 // ============================================================================
 
-void startCalibration() {
-  Serial.println("CALIBRATION:STARTED");
-  Serial.println("STATUS:Move sensor between darkest and brightest positions");
+void saveSettings() {
+  EEPROM.write(EEPROM_ADDR_AUTO_MODE, EEPROM_MAGIC_NUMBER);
+  EEPROM.write(EEPROM_ADDR_OPEN_THRESHOLD, lowByte(openThreshold));
+  EEPROM.write(EEPROM_ADDR_OPEN_THRESHOLD + 1, highByte(openThreshold));
+  EEPROM.write(EEPROM_ADDR_CLOSE_THRESHOLD, lowByte(closeThreshold));
+  EEPROM.write(EEPROM_ADDR_CLOSE_THRESHOLD + 1, highByte(closeThreshold));
   
-  lightMin = 1023;
-  lightMax = 0;
-  
-  unsigned long calibrationStart = millis();
-  const unsigned long CALIBRATION_TIME = 10000; // 10 seconds
-  
-  while (millis() - calibrationStart < CALIBRATION_TIME) {
-    int reading = analogRead(LIGHT_SENSOR_PIN);
-    
-    if (reading < lightMin) {
-      lightMin = reading;
-      Serial.print("CALIBRATION:MIN_UPDATE:");
-      Serial.println(lightMin);
-    }
-    
-    if (reading > lightMax) {
-      lightMax = reading;
-      Serial.print("CALIBRATION:MAX_UPDATE:");
-      Serial.println(lightMax);
-    }
-    
-    delay(100);
-  }
-  
-  // Add some margin
-  lightMin = max(0, lightMin - 10);
-  lightMax = min(1023, lightMax + 10);
-  
-  // Save to EEPROM
-  saveCalibration();
-  
-  Serial.print("CALIBRATION:COMPLETE,MIN:");
-  Serial.print(lightMin);
-  Serial.print(",MAX:");
-  Serial.println(lightMax);
+  Serial.println("SETTINGS:SAVED");
 }
 
-void saveCalibration() {
-  EEPROM.write(EEPROM_ADDR_CALIBRATED, EEPROM_MAGIC_NUMBER);
-  EEPROM.write(EEPROM_ADDR_MIN_LIGHT, lowByte(lightMin));
-  EEPROM.write(EEPROM_ADDR_MIN_LIGHT + 1, highByte(lightMin));
-  EEPROM.write(EEPROM_ADDR_MAX_LIGHT, lowByte(lightMax));
-  EEPROM.write(EEPROM_ADDR_MAX_LIGHT + 1, highByte(lightMax));
-  
-  isCalibrated = true;
-  Serial.println("CALIBRATION:SAVED");
-}
-
-void loadCalibration() {
-  byte magic = EEPROM.read(EEPROM_ADDR_CALIBRATED);
+void loadSettings() {
+  byte magic = EEPROM.read(EEPROM_ADDR_AUTO_MODE);
   
   if (magic == EEPROM_MAGIC_NUMBER) {
-    lightMin = word(EEPROM.read(EEPROM_ADDR_MIN_LIGHT + 1), 
-                    EEPROM.read(EEPROM_ADDR_MIN_LIGHT));
-    lightMax = word(EEPROM.read(EEPROM_ADDR_MAX_LIGHT + 1), 
-                    EEPROM.read(EEPROM_ADDR_MAX_LIGHT));
-    isCalibrated = true;
-    Serial.println("CALIBRATION:LOADED");
+    openThreshold = word(EEPROM.read(EEPROM_ADDR_OPEN_THRESHOLD + 1), 
+                         EEPROM.read(EEPROM_ADDR_OPEN_THRESHOLD));
+    closeThreshold = word(EEPROM.read(EEPROM_ADDR_CLOSE_THRESHOLD + 1), 
+                          EEPROM.read(EEPROM_ADDR_CLOSE_THRESHOLD));
+    Serial.println("SETTINGS:LOADED");
   } else {
-    Serial.println("CALIBRATION:NOT_FOUND");
-    isCalibrated = false;
+    Serial.println("SETTINGS:NOT_FOUND_USING_DEFAULTS");
   }
 }
 
-void resetCalibration() {
-  lightMin = LIGHT_MIN_DEFAULT;
-  lightMax = LIGHT_MAX_DEFAULT;
-  isCalibrated = false;
-  EEPROM.write(EEPROM_ADDR_CALIBRATED, 0);
-  Serial.println("CALIBRATION:RESET");
+void resetSettings() {
+  openThreshold = 300;
+  closeThreshold = 700;
+  autoMode = true;
+  manualMode = false;
+  EEPROM.write(EEPROM_ADDR_AUTO_MODE, 0);
+  Serial.println("SETTINGS:RESET");
 }
 
 // ============================================================================
@@ -385,39 +386,68 @@ void processCommand(String command) {
   String params = (colonPos > 0) ? command.substring(colonPos + 1) : "";
   
   // Command routing
-  if (cmd == "OPEN_CURTAIN" || cmd == "OPEN") {
-    openCurtain();
+  if (cmd == "AUTO" || cmd == "AUTO_MODE") {
+    setAutoMode(true);
   }
-  else if (cmd == "CLOSE_CURTAIN" || cmd == "CLOSE") {
-    closeCurtain();
-  }
-  else if (cmd == "STOP_MOTOR" || cmd == "STOP") {
-    stopMotor();
-  }
-  else if (cmd == "READ_LIGHT") {
-    Serial.print("LIGHT:");
-    Serial.println(lightAverage);
-    Serial.print("LIGHT_PERCENT:");
-    Serial.println(getPercentageLight());
-    Serial.print("LIGHT_RAW:");
-    Serial.println(analogRead(LIGHT_SENSOR_PIN));
-  }
-  else if (cmd == "GET_STATUS") {
-    sendStatusReport();
-  }
-  else if (cmd == "CALIBRATE_LIGHT" || cmd == "CALIBRATE") {
-    startCalibration();
-  }
-  else if (cmd == "RESET_CALIBRATION") {
-    resetCalibration();
+  else if (cmd == "MANUAL" || cmd == "MANUAL_MODE") {
+    setAutoMode(false);
   }
   else if (cmd == "SET_SPEED") {
     if (params.length() > 0) {
       int speed = params.toInt();
-      setMotorSpeed(speed);
+      // If percentage (0-100), convert to PWM (0-255)
+      if (speed <= 100) {
+        speed = map(speed, 0, 100, 0, 255);
+      }
+      setMotorSpeedManual(speed);
     } else {
       Serial.println("ERROR:MISSING_SPEED_PARAMETER");
     }
+  }
+  else if (cmd == "STOP_MOTOR" || cmd == "STOP") {
+    stopMotor();
+  }
+  else if (cmd == "SET_OPEN_THRESHOLD") {
+    if (params.length() > 0) {
+      int threshold = params.toInt();
+      setOpenThreshold(threshold);
+    } else {
+      Serial.println("ERROR:MISSING_THRESHOLD_PARAMETER");
+    }
+  }
+  else if (cmd == "SET_CLOSE_THRESHOLD") {
+    if (params.length() > 0) {
+      int threshold = params.toInt();
+      setCloseThreshold(threshold);
+    } else {
+      Serial.println("ERROR:MISSING_THRESHOLD_PARAMETER");
+    }
+  }
+  else if (cmd == "OPEN_CURTAIN") {
+    if (manualMode) {
+      startManualOpen();
+    } else {
+      Serial.println("ERROR:NOT_IN_MANUAL_MODE");
+    }
+  }
+  else if (cmd == "CLOSE_CURTAIN") {
+    if (manualMode) {
+      startManualClose();
+    } else {
+      Serial.println("ERROR:NOT_IN_MANUAL_MODE");
+    }
+  }
+  else if (cmd == "READ_LIGHT") {
+    Serial.print("LIGHT:");
+    Serial.println(lightAverage);
+    Serial.print("LIGHT_RAW:");
+    Serial.println(currentLightRaw);
+  }
+  else if (cmd == "GET_STATUS") {
+    sendStatusReport();
+  }
+  else if (cmd == "RESET_SETTINGS") {
+    resetSettings();
   }
   else if (cmd == "TEST_MOTOR") {
     testMotor();
@@ -426,7 +456,7 @@ void processCommand(String command) {
     Serial.println("PONG");
   }
   else if (cmd == "VERSION") {
-    Serial.println("VERSION:2.1-SPINNING");
+    Serial.println("VERSION:2.3-Enhanced");
   }
   else {
     Serial.print("ERROR:UNKNOWN_COMMAND:");
@@ -444,38 +474,20 @@ void sendStatusReport() {
   // Light sensor status
   Serial.print("LIGHT:");
   Serial.println(lightAverage);
-  Serial.print("LIGHT_PERCENT:");
-  Serial.println(getPercentageLight());
   Serial.print("LIGHT_RAW:");
-  Serial.println(analogRead(LIGHT_SENSOR_PIN));
+  Serial.println(currentLightRaw);
+  Serial.print("OPEN_THRESHOLD:");
+  Serial.println(openThreshold);
+  Serial.print("CLOSE_THRESHOLD:");
+  Serial.println(closeThreshold);
   
   // Motor status
-  Serial.print("MOTOR:");
-  switch(motorState) {
-    case MOTOR_STOPPED:  Serial.println("STOPPED"); break;
-    case MOTOR_OPENING:  Serial.println("OPENING"); break;
-    case MOTOR_CLOSING:  Serial.println("CLOSING"); break;
-  }
-  
   Serial.print("MOTOR_SPEED:");
   Serial.println(currentMotorSpeed);
   
-  // Curtain position
-  Serial.print("POSITION:");
-  switch(curtainPosition) {
-    case POSITION_UNKNOWN: Serial.println("UNKNOWN"); break;
-    case POSITION_OPEN:    Serial.println("OPEN"); break;
-    case POSITION_CLOSED:  Serial.println("CLOSED"); break;
-    case POSITION_PARTIAL: Serial.println("PARTIAL"); break;
-  }
-  
-  // Calibration status
-  Serial.print("CALIBRATION:");
-  Serial.print(isCalibrated ? "YES" : "NO");
-  Serial.print(",MIN:");
-  Serial.print(lightMin);
-  Serial.print(",MAX:");
-  Serial.println(lightMax);
+  // Mode status
+  Serial.print("MODE:");
+  Serial.println(autoMode ? "AUTO" : "MANUAL");
   
   // System info
   Serial.print("UPTIME:");
@@ -490,17 +502,38 @@ void sendStatusReport() {
 
 void testMotor() {
   Serial.println("TEST:MOTOR_START");
-  Serial.println("TEST:Testing fast speed (opening)...");
   
-  analogWrite(MOTOR_PIN, MOTOR_SPEED_OPENING);
+  // Save current mode
+  bool wasAuto = autoMode;
+  
+  // Switch to manual for testing
+  autoMode = false;
+  manualMode = true;
+  
+  Serial.println("TEST:Testing 25% speed...");
+  analogWrite(MOTOR_PIN, 64);
   delay(2000);
   
-  Serial.println("TEST:Testing slow speed (closing)...");
-  analogWrite(MOTOR_PIN, MOTOR_SPEED_CLOSING);
+  Serial.println("TEST:Testing 50% speed...");
+  analogWrite(MOTOR_PIN, 128);
+  delay(2000);
+  
+  Serial.println("TEST:Testing 75% speed...");
+  analogWrite(MOTOR_PIN, 192);
+  delay(2000);
+  
+  Serial.println("TEST:Testing 100% speed...");
+  analogWrite(MOTOR_PIN, 255);
   delay(2000);
   
   Serial.println("TEST:Stopping motor...");
   analogWrite(MOTOR_PIN, 0);
   
+  // Restore previous mode
+  autoMode = wasAuto;
+  manualMode = !wasAuto;
+  
   Serial.println("TEST:MOTOR_COMPLETE");
+  Serial.print("TEST:Restored to ");
+  Serial.println(autoMode ? "AUTO" : "MANUAL");
 } 
