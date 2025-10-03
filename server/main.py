@@ -408,26 +408,12 @@ def set_mode():
     if mode not in ['auto', 'manual']:
         return jsonify({'error': 'Invalid mode'}), 400
     
-    if not serial_mgr or not serial_mgr.is_connected():
-        return jsonify({'error': 'Arduino not connected'}), 503
-    
-    try:
-        # Send command to Arduino
-        if mode == 'auto':
-            serial_mgr.send_command("AUTO_MODE")
-        else:
-            serial_mgr.send_command("MANUAL_MODE")
-        
-        # Update system status
-        if system_status:
-            system_status.settings.auto_mode_enabled = (mode == 'auto')
-            system_status.curtain.mode = SystemMode(mode)
-        
+    if system_status:
+        system_status.settings.auto_mode_enabled = (mode == 'auto')
+        system_status.curtain.mode = SystemMode(mode)
         return jsonify({'status': 'success', 'mode': mode})
-        
-    except Exception as e:
-        logging.error(f"Error setting mode: {e}")
-        return jsonify({'error': str(e)}), 500
+    else:
+        return jsonify({'error': 'Status not available'}), 503
 
 
 @app.route('/api/v1/system/status')
@@ -456,8 +442,8 @@ def calibrate():
 def get_thresholds():
     """Get current light thresholds"""
     return jsonify({
-        'dark_threshold': config['curtain']['thresholds']['dark'],
-        'bright_threshold': config['curtain']['thresholds']['bright']
+        'open_threshold': config['curtain']['thresholds']['dark'],
+        'close_threshold': config['curtain']['thresholds']['bright']
     })
 
 
@@ -470,22 +456,22 @@ def set_thresholds():
         return jsonify({'error': 'Arduino not connected'}), 503
     
     try:
-        if 'dark_threshold' in data:
-            dark_threshold = int(data['dark_threshold'])
-            if 0 <= dark_threshold <= 1023:
-                serial_mgr.send_command("SET_OPEN_THRESHOLD", str(dark_threshold))
-                config['curtain']['thresholds']['dark'] = dark_threshold
+        if 'open_threshold' in data:
+            open_threshold = int(data['open_threshold'])
+            if 0 <= open_threshold <= 1023:
+                serial_mgr.send_command("SET_OPEN_THRESHOLD", str(open_threshold))
+                config['curtain']['thresholds']['dark'] = open_threshold
         
-        if 'bright_threshold' in data:
-            bright_threshold = int(data['bright_threshold'])
-            if 0 <= bright_threshold <= 1023:
-                serial_mgr.send_command("SET_CLOSE_THRESHOLD", str(bright_threshold))
-                config['curtain']['thresholds']['bright'] = bright_threshold
+        if 'close_threshold' in data:
+            close_threshold = int(data['close_threshold'])
+            if 0 <= close_threshold <= 1023:
+                serial_mgr.send_command("SET_CLOSE_THRESHOLD", str(close_threshold))
+                config['curtain']['thresholds']['bright'] = close_threshold
         
         return jsonify({
             'status': 'success',
-            'dark_threshold': config['curtain']['thresholds']['dark'],
-            'bright_threshold': config['curtain']['thresholds']['bright']
+            'open_threshold': config['curtain']['thresholds']['dark'],
+            'close_threshold': config['curtain']['thresholds']['bright']
         })
         
     except (ValueError, KeyError) as e:
