@@ -573,6 +573,7 @@
         window.onload = function() {
             updateLightReading();
             updateSystemStatus();
+            loadThresholds();
             
             // Update every second
             updateInterval = setInterval(() => {
@@ -580,6 +581,23 @@
                 updateSystemStatus();
             }, 1000);
         };
+
+        // Load current thresholds from server
+        async function loadThresholds() {
+            try {
+                const response = await fetch('/api/v1/curtain/thresholds');
+                const data = await response.json();
+                
+                if (response.ok) {
+                    document.getElementById('darkThreshold').value = data.dark_threshold;
+                    document.getElementById('brightThreshold').value = data.bright_threshold;
+                    document.getElementById('darkValue').textContent = data.dark_threshold;
+                    document.getElementById('brightValue').textContent = data.bright_threshold;
+                }
+            } catch (error) {
+                console.error('Error loading thresholds:', error);
+            }
+        }
 
         // Update light sensor reading
         async function updateLightReading() {
@@ -638,6 +656,16 @@
                     document.getElementById('modeToggle').checked = (currentMode === 'auto');
                     document.getElementById('modeLabel').textContent = 
                         currentMode === 'auto' ? 'Automatic Mode' : 'Manual Mode';
+                    
+                    // Enable/disable manual control buttons based on mode
+                    const isManualMode = (currentMode === 'manual');
+                    const openBtn = document.querySelector('.btn-open');
+                    const closeBtn = document.querySelector('.btn-close');
+                    const stopBtn = document.querySelector('.btn-stop');
+                    
+                    if (openBtn) openBtn.disabled = !isManualMode;
+                    if (closeBtn) closeBtn.disabled = !isManualMode;
+                    if (stopBtn) stopBtn.disabled = !isManualMode;
                 }
                 
                 // Update Arduino status
@@ -673,6 +701,13 @@
 
         // Control functions
         async function openCurtain() {
+            // Check if button is disabled (more reliable than currentMode variable)
+            const openBtn = document.querySelector('.btn-open');
+            if (openBtn && openBtn.disabled) {
+                alert('⚠️ Please switch to Manual Mode first');
+                return;
+            }
+            
             try {
                 const response = await fetch('/api/v1/curtain/control', {
                     method: 'POST',
@@ -681,6 +716,17 @@
                 });
                 const data = await response.json();
                 console.log('Open curtain:', data);
+                
+                if (response.ok) {
+                    // Show visual feedback
+                    const openBtn = document.querySelector('.btn-open');
+                    const originalText = openBtn.innerHTML;
+                    openBtn.innerHTML = '⏳ Opening...';
+                    setTimeout(() => {
+                        openBtn.innerHTML = originalText;
+                    }, 3000); // Reset after 3 seconds (manual open duration)
+                }
+                
                 updateSystemStatus();
             } catch (error) {
                 console.error('Error opening curtain:', error);
@@ -689,6 +735,13 @@
         }
 
         async function closeCurtain() {
+            // Check if button is disabled (more reliable than currentMode variable)
+            const closeBtn = document.querySelector('.btn-close');
+            if (closeBtn && closeBtn.disabled) {
+                alert('⚠️ Please switch to Manual Mode first');
+                return;
+            }
+            
             try {
                 const response = await fetch('/api/v1/curtain/control', {
                     method: 'POST',
@@ -697,6 +750,17 @@
                 });
                 const data = await response.json();
                 console.log('Close curtain:', data);
+                
+                if (response.ok) {
+                    // Show visual feedback
+                    const closeBtn = document.querySelector('.btn-close');
+                    const originalText = closeBtn.innerHTML;
+                    closeBtn.innerHTML = '⏳ Closing...';
+                    setTimeout(() => {
+                        closeBtn.innerHTML = originalText;
+                    }, 6000); // Reset after 6 seconds (manual close duration)
+                }
+                
                 updateSystemStatus();
             } catch (error) {
                 console.error('Error closing curtain:', error);
@@ -713,6 +777,18 @@
                 });
                 const data = await response.json();
                 console.log('Stop curtain:', data);
+                
+                if (response.ok) {
+                    // Reset any button feedback immediately
+                    const openBtn = document.querySelector('.btn-open');
+                    const closeBtn = document.querySelector('.btn-close');
+                    if (openBtn.innerHTML.includes('Opening')) {
+                        openBtn.innerHTML = '<span>▲</span> Open Curtains';
+                    }
+                    if (closeBtn.innerHTML.includes('Closing')) {
+                        closeBtn.innerHTML = '<span>▼</span> Close Curtains';
+                    }
+                }
             } catch (error) {
                 console.error('Error stopping curtain:', error);
                 alert('Failed to stop curtain');
@@ -758,10 +834,31 @@
             const darkThreshold = parseInt(document.getElementById('darkThreshold').value);
             const brightThreshold = parseInt(document.getElementById('brightThreshold').value);
             
-            // Note: This would need a new API endpoint to save thresholds
-            // For now, we'll just show a message
-            console.log('Saving thresholds:', { darkThreshold, brightThreshold });
-            alert(`Thresholds updated:\nDark: < ${darkThreshold}\nBright: > ${brightThreshold}`);
+            try {
+                const response = await fetch('/api/v1/curtain/thresholds', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        dark_threshold: darkThreshold, 
+                        bright_threshold: brightThreshold 
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    let message = `✅ Thresholds saved successfully!\nDark: < ${darkThreshold}\nBright: > ${brightThreshold}`;
+                    if (data.warning) {
+                        message += `\n\n⚠️ ${data.warning}`;
+                    }
+                    alert(message);
+                } else {
+                    alert(`❌ Error saving thresholds: ${data.error}`);
+                }
+            } catch (error) {
+                console.error('Error saving thresholds:', error);
+                alert('❌ Failed to save thresholds. Check connection.');
+            }
         }
 
         // Update last update timestamp
