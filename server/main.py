@@ -99,12 +99,20 @@ def setup_components():
         serial_mgr.register_callback('LIGHT', on_light_reading)
         serial_mgr.register_callback('POSITION', on_position_update)
         serial_mgr.register_callback('MOTOR', on_motor_status)
+        serial_mgr.register_callback('MODE', on_mode_update)
         serial_mgr.register_callback('ERROR', on_arduino_error)
         
         # Attempt connection
         if serial_mgr.connect():
             system_status.arduino = serial_mgr.get_arduino_status()
             logger.info("Arduino connected successfully")
+            
+            # Initialize Arduino to manual mode to sync with server default
+            # Wait longer to ensure Arduino has fully booted and processed initial messages
+            time.sleep(1.5)  # Increased delay for Arduino initialization
+            serial_mgr.send_command("MANUAL_MODE")
+            time.sleep(0.3)  # Wait for response
+            logger.info("Initialized Arduino to MANUAL mode")
         else:
             logger.warning("Arduino connection failed - running without hardware")
             
@@ -193,6 +201,26 @@ def on_motor_status(status: str):
         logging.info(f"Motor status updated: {status}")
     except Exception as e:
         logging.error(f"Error handling motor status: {e}")
+
+
+def on_mode_update(mode: str):
+    """Handle mode update from Arduino"""
+    global system_status
+    
+    try:
+        mode_lower = mode.lower()
+        logging.info(f"Received MODE update from Arduino: '{mode_lower}'")
+        
+        if system_status:
+            # Update both the settings and curtain mode
+            system_status.settings.auto_mode_enabled = (mode_lower == 'auto')
+            system_status.curtain.mode = SystemMode(mode_lower)
+            logging.info(f"✓ System status updated: mode={mode_lower}, auto_enabled={system_status.settings.auto_mode_enabled}")
+        else:
+            logging.warning("System status not initialized, cannot update mode")
+            
+    except Exception as e:
+        logging.error(f"Error handling mode update: {e}", exc_info=True)
 
 
 def on_arduino_error(error_msg: str):
@@ -408,12 +436,37 @@ def set_mode():
     if mode not in ['auto', 'manual']:
         return jsonify({'error': 'Invalid mode'}), 400
     
-    if system_status:
-        system_status.settings.auto_mode_enabled = (mode == 'auto')
-        system_status.curtain.mode = SystemMode(mode)
+    if not serial_mgr or not serial_mgr.is_connected():
+        return jsonify({'error': 'Arduino not connected'}), 503
+    
+    try:
+        # Send command to Arduino
+        if mode == 'auto':
+            serial_mgr.send_command("AUTO_MODE")
+        else:
+            serial_mgr.send_command("MANUAL_MODE")
+        
+        # Wait briefly for Arduino to process and respond
+        time.sleep(0.2)
+        
+        # System status will be updated by the on_mode_update callback
+        # when Arduino responds with MODE:AUTO or MODE:MANUAL
+        
+        # Verify the mode was set correctly by checking system status
+        if system_status:
+            actual_mode = system_status.curtain.mode.value
+            if actual_mode == mode:
+                logger.info(f"Mode successfully changed to {mode}")
+                return jsonify({'status': 'success', 'mode': mode})
+            else:
+                logger.warning(f"Mode change requested to {mode} but Arduino is in {actual_mode}")
+                return jsonify({'status': 'warning', 'requested': mode, 'actual': actual_mode})
+        
         return jsonify({'status': 'success', 'mode': mode})
-    else:
-        return jsonify({'error': 'Status not available'}), 503
+        
+    except Exception as e:
+        logging.error(f"Error setting mode: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/v1/system/status')
@@ -442,8 +495,8 @@ def calibrate():
 def get_thresholds():
     """Get current light thresholds"""
     return jsonify({
-        'open_threshold': config['curtain']['thresholds']['dark'],
-        'close_threshold': config['curtain']['thresholds']['bright']
+        'dark_threshold': config['curtain']['thresholds']['dark'],
+        'bright_threshold': config['curtain']['thresholds']['bright']
     })
 
 
@@ -452,27 +505,35 @@ def set_thresholds():
     """Set light thresholds"""
     data = request.json
     
-    if not serial_mgr or not serial_mgr.is_connected():
-        return jsonify({'error': 'Arduino not connected'}), 503
-    
     try:
-        if 'open_threshold' in data:
-            open_threshold = int(data['open_threshold'])
-            if 0 <= open_threshold <= 1023:
-                serial_mgr.send_command("SET_OPEN_THRESHOLD", str(open_threshold))
-                config['curtain']['thresholds']['dark'] = open_threshold
+        arduino_connected = serial_mgr and serial_mgr.is_connected()
         
-        if 'close_threshold' in data:
-            close_threshold = int(data['close_threshold'])
-            if 0 <= close_threshold <= 1023:
-                serial_mgr.send_command("SET_CLOSE_THRESHOLD", str(close_threshold))
-                config['curtain']['thresholds']['bright'] = close_threshold
+        if 'dark_threshold' in data:
+            dark_threshold = int(data['dark_threshold'])
+            if 0 <= dark_threshold <= 1023:
+                config['curtain']['thresholds']['dark'] = dark_threshold
+                # Send to Arduino if connected
+                if arduino_connected:
+                    serial_mgr.send_command("SET_OPEN_THRESHOLD", str(dark_threshold))
         
-        return jsonify({
+        if 'bright_threshold' in data:
+            bright_threshold = int(data['bright_threshold'])
+            if 0 <= bright_threshold <= 1023:
+                config['curtain']['thresholds']['bright'] = bright_threshold
+                # Send to Arduino if connected
+                if arduino_connected:
+                    serial_mgr.send_command("SET_CLOSE_THRESHOLD", str(bright_threshold))
+        
+        response_data = {
             'status': 'success',
-            'open_threshold': config['curtain']['thresholds']['dark'],
-            'close_threshold': config['curtain']['thresholds']['bright']
-        })
+            'dark_threshold': config['curtain']['thresholds']['dark'],
+            'bright_threshold': config['curtain']['thresholds']['bright']
+        }
+        
+        if not arduino_connected:
+            response_data['warning'] = 'Thresholds saved locally but not sent to Arduino (disconnected)'
+        
+        return jsonify(response_data)
         
     except (ValueError, KeyError) as e:
         return jsonify({'error': 'Invalid threshold values'}), 400
