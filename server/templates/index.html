@@ -573,6 +573,7 @@
         window.onload = function() {
             updateLightReading();
             updateSystemStatus();
+            loadThresholds();
             
             // Update every second
             updateInterval = setInterval(() => {
@@ -580,6 +581,23 @@
                 updateSystemStatus();
             }, 1000);
         };
+
+        // Load current thresholds from server
+        async function loadThresholds() {
+            try {
+                const response = await fetch('/api/v1/curtain/thresholds');
+                const data = await response.json();
+                
+                if (response.ok) {
+                    document.getElementById('darkThreshold').value = data.dark_threshold;
+                    document.getElementById('brightThreshold').value = data.bright_threshold;
+                    document.getElementById('darkValue').textContent = data.dark_threshold;
+                    document.getElementById('brightValue').textContent = data.bright_threshold;
+                }
+            } catch (error) {
+                console.error('Error loading thresholds:', error);
+            }
+        }
 
         // Update light sensor reading
         async function updateLightReading() {
@@ -758,10 +776,27 @@
             const darkThreshold = parseInt(document.getElementById('darkThreshold').value);
             const brightThreshold = parseInt(document.getElementById('brightThreshold').value);
             
-            // Note: This would need a new API endpoint to save thresholds
-            // For now, we'll just show a message
-            console.log('Saving thresholds:', { darkThreshold, brightThreshold });
-            alert(`Thresholds updated:\nDark: < ${darkThreshold}\nBright: > ${brightThreshold}`);
+            try {
+                const response = await fetch('/api/v1/curtain/thresholds', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        dark_threshold: darkThreshold, 
+                        bright_threshold: brightThreshold 
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert(`✅ Thresholds saved successfully!\nDark: < ${darkThreshold}\nBright: > ${brightThreshold}`);
+                } else {
+                    alert(`❌ Error saving thresholds: ${data.error}`);
+                }
+            } catch (error) {
+                console.error('Error saving thresholds:', error);
+                alert('❌ Failed to save thresholds. Check connection.');
+            }
         }
 
         // Update last update timestamp

@@ -178,26 +178,22 @@ void readLightSensor() {
 // ============================================================================
 
 void updateMotorFromLight() {
-  int motorSpeed = 0;
-  bool shouldOpen = lightAverage < openThreshold;
-  bool shouldClose = lightAverage > closeThreshold;
-
-  if (shouldOpen) {
-    // Opening: faster speed when light is below open threshold
-    // Map light value to faster speed range (128-255)
-    motorSpeed = map(lightAverage, 0, openThreshold, 255, 128);
-    motorSpeed = constrain(motorSpeed, 128, 255);
-    Serial.print("AUTO OPENING - ");
-  } else if (shouldClose) {
-    // Closing: slower speed when light is above close threshold
-    // Map light value to slower speed range (64-127)
-    motorSpeed = map(lightAverage, closeThreshold, 1023, 64, 127);
-    motorSpeed = constrain(motorSpeed, 64, 127);
-    Serial.print("AUTO CLOSING - ");
+  int motorSpeed;
+  
+  // Continuous motor operation based on light level
+  // Dark (low light) = slower speed, Bright (high light) = faster speed
+  if (lightAverage <= openThreshold) {
+    // Dark conditions - run at slower speed
+    motorSpeed = 80;  // Slow speed for dark conditions
+    Serial.print("AUTO DARK MODE - ");
+  } else if (lightAverage >= closeThreshold) {
+    // Bright conditions - run at faster speed  
+    motorSpeed = 180; // Fast speed for bright conditions
+    Serial.print("AUTO BRIGHT MODE - ");
   } else {
-    // Between thresholds - stop motor
-    motorSpeed = 0;
-    Serial.print("AUTO STOPPED - ");
+    // Between thresholds - medium speed
+    motorSpeed = 120; // Medium speed between thresholds
+    Serial.print("AUTO MEDIUM MODE - ");
   }
 
   // Apply speed to motor
@@ -293,15 +289,15 @@ void setAutoMode(bool enable) {
   autoMode = enable;
   manualMode = !enable;
   
-  if (!autoMode) {
-    // Switched to manual - stop motor
-    stopMotor();
-  }
+  // Always stop motor when changing modes
+  stopMotor();
   
   saveSettings();
   
   Serial.print("MODE:");
   Serial.println(autoMode ? "AUTO" : "MANUAL");
+  Serial.print("MANUAL_MODE:");
+  Serial.println(manualMode ? "TRUE" : "FALSE");
 }
 
 void setOpenThreshold(int newThreshold) {
